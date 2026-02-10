@@ -21,7 +21,7 @@ CONFIG = {
     "CHANNELS": 1,
     "BIT_DEPTH": "PCM_16",
     "MIN_SEGMENT_LEN": 2000,   # Minimum segment length in milliseconds (2 seconds)
-    "MAX_SEGMENT_LEN": 15000,  # Maximum segment length in milliseconds (15 seconds)
+    "MAX_SEGMENT_LEN": 15000,  # Maximum segment length in milliseconds (15 seconds - Hard Limit)
     "MIN_SILENCE_LEN": 500,    # Minimum silence length to detect for splitting (500ms)
     "SILENCE_THRESH": -40,     # Silence threshold in dBFS (-40dBFS)
     "KEEP_SILENCE": 300,       # Silence to keep at segment boundaries (300ms)
@@ -91,44 +91,96 @@ class AudioPipeline:
         # Apply padding and return trimmed segment
         return audio_segment[max(0, start_trim-padding):min(len(audio_segment), end_trim+padding)]
 
+    def smart_split_long_chunk(self, chunk):
+        """Recursively split chunks exceeding maximum length at quietest points"""
+        if len(chunk) <= CONFIG['MAX_SEGMENT_LEN']:
+            return [chunk]
+        
+        # Search for split point between 10s and 15s
+        search_start = 10000  # 10 seconds
+        search_end = CONFIG['MAX_SEGMENT_LEN']  # 15 seconds
+        
+        # Safety check for chunks shorter than search_end
+        if len(chunk) < search_end:
+            search_end = len(chunk)
+
+        # Analyze volume in the search window to find quietest point
+        window = chunk[search_start:search_end]
+        step = 100  # Check every 100ms
+        min_loudness = 0
+        split_point = search_end  # Default to hard cut at max length
+        
+        best_split_found = False
+        
+        # Find lowest dBFS (quietest point) in the window
+        for i in range(0, len(window) - step, step):
+            loudness = window[i:i+step].dBFS
+            if loudness < min_loudness:
+                min_loudness = loudness
+                split_point = search_start + i
+                best_split_found = True
+        
+        # If no suitable quiet point found, cut at 14.5s
+        if not best_split_found or min_loudness > -10:
+            split_point = 14500
+        
+        # Split chunk and recursively process second part
+        first_part = chunk[:split_point]
+        second_part = chunk[split_point:]
+        
+        return [first_part] + self.smart_split_long_chunk(second_part)
+
     def split_and_process(self, raw_audio_path):
-        """Split audio into segments based on silence detection"""
-        print(f"{Fore.YELLOW}Splitting audio using silence detection...{Style.RESET_ALL}")
+        """Split audio into segments using silence detection and force splitting for long segments"""
+        print(f"{Fore.YELLOW}Splitting audio (with force splitting for long segments)...{Style.RESET_ALL}")
         audio = AudioSegment.from_wav(raw_audio_path)
         
-        # Initial split on silence
-        chunks = split_on_silence(
+        # Initial split based on silence detection
+        initial_chunks = split_on_silence(
             audio,
             min_silence_len=CONFIG['MIN_SILENCE_LEN'],
             silence_thresh=CONFIG['SILENCE_THRESH'],
             keep_silence=CONFIG['KEEP_SILENCE']
         )
 
-        # Merge chunks to meet length constraints
-        processed_chunks = []
+        final_chunks = []
         current_chunk = AudioSegment.empty()
 
-        for chunk in chunks:
+        for chunk in initial_chunks:
             # Clean silence from chunk boundaries
             chunk = self.strip_silence(chunk)
             
-            # Skip extremely small chunks (likely noise)
+            # Skip very small chunks (likely noise)
             if len(chunk) < 500:
                 continue
 
-            # Merge chunks if within size limit
+            # Check if adding chunk exceeds maximum length
             if len(current_chunk) + len(chunk) < CONFIG['MAX_SEGMENT_LEN']:
                 current_chunk += chunk
             else:
+                # Save current chunk if it meets minimum length
                 if len(current_chunk) >= CONFIG['MIN_SEGMENT_LEN']:
-                    processed_chunks.append(current_chunk)
-                current_chunk = chunk
+                    final_chunks.append(current_chunk)
+                
+                # Handle new chunk - check if it's too long
+                if len(chunk) > CONFIG['MAX_SEGMENT_LEN']:
+                    # Force split the long chunk
+                    split_pieces = self.smart_split_long_chunk(chunk)
+                    # Add all but last piece to final list
+                    final_chunks.extend(split_pieces[:-1])
+                    # Last piece becomes new current chunk for potential merging
+                    current_chunk = split_pieces[-1]
+                else:
+                    current_chunk = chunk
         
-        # Add final chunk if long enough
+        # Handle final chunk
         if len(current_chunk) >= CONFIG['MIN_SEGMENT_LEN']:
-            processed_chunks.append(current_chunk)
+            if len(current_chunk) > CONFIG['MAX_SEGMENT_LEN']:
+                final_chunks.extend(self.smart_split_long_chunk(current_chunk))
+            else:
+                final_chunks.append(current_chunk)
 
-        return processed_chunks
+        return final_chunks
 
     def clean_audio(self, audio_segment):
         """Apply noise reduction to audio segment"""
@@ -154,6 +206,11 @@ class AudioPipeline:
 
         # Process each chunk
         for i, chunk in enumerate(tqdm(chunks, desc="Transcribing")):
+            # Verify chunk doesn't exceed length limit (with 100ms tolerance)
+            if len(chunk) > CONFIG['MAX_SEGMENT_LEN'] + 100:
+                print(f"{Fore.RED}Skipping segment {i} (Length {len(chunk)}ms > 15s limit){Style.RESET_ALL}")
+                continue
+                
             self.total_audio_duration += len(chunk) / 1000.0
             
             # Clean and save audio
@@ -190,7 +247,7 @@ class AudioPipeline:
         rtf = total_time / self.total_audio_duration if self.total_audio_duration > 0 else 0
         
         print(f"\n{Fore.GREEN}Pipeline Complete!{Style.RESET_ALL}")
-        print(f"Metadata saved to: {self.metadata_file} (Excel compatible)")
+        print(f"Metadata saved to: {self.metadata_file}")
         print(f"{Fore.YELLOW}Performance Metrics:{Style.RESET_ALL}")
         print(f"   - Total Audio Processed: {self.total_audio_duration:.2f} sec")
         print(f"   - Real-Time Factor (RTF): {rtf:.2f}")
@@ -199,4 +256,4 @@ if __name__ == "__main__":
     url = input("Enter YouTube URL: ")
     if url:
         pipeline = AudioPipeline(CONFIG['OUTPUT_DIR'], CONFIG['METADATA_FILE'])
-        pipeline.run(url, speaker_name="Habibur_Sample") 
+        pipeline.run(url, speaker_name="Habibur_Sample")
