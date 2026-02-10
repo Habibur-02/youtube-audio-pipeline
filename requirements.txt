@@ -1,0 +1,9 @@
+yt-dlp
+pydub
+faster-whisper
+noisereduce
+soundfile
+numpy
+pandas
+tqdm
+colorama
