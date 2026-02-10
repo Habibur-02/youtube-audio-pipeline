@@ -22,9 +22,9 @@ CONFIG = {
     "BIT_DEPTH": "PCM_16",
     "MIN_SEGMENT_LEN": 2000,   # Minimum segment length in milliseconds (2 seconds)
     "MAX_SEGMENT_LEN": 15000,  # Maximum segment length in milliseconds (15 seconds)
-    "MIN_SILENCE_LEN": 500,    # Minimum silence length to detect for splitting
-    "SILENCE_THRESH": -40,     # Silence threshold in dBFS
-    "KEEP_SILENCE": 300,       # Silence to keep at segment boundaries
+    "MIN_SILENCE_LEN": 500,    # Minimum silence length to detect for splitting (500ms)
+    "SILENCE_THRESH": -40,     # Silence threshold in dBFS (-40dBFS)
+    "KEEP_SILENCE": 300,       # Silence to keep at segment boundaries (300ms)
     "OUTPUT_DIR": "wavs",
     "METADATA_FILE": "metadata.csv"
 }
@@ -39,23 +39,32 @@ class AudioPipeline:
         self.total_audio_duration = 0
         self.start_time = 0
         
-        # Clean and recreate output directory
+        # Setup output directory
         if os.path.exists(self.output_dir):
-            shutil.rmtree(self.output_dir)
-        os.makedirs(self.output_dir)
+            try:
+                shutil.rmtree(self.output_dir)
+            except Exception as e:
+                print(f"{Fore.RED}Warning: Could not clear wavs folder. {e}{Style.RESET_ALL}")
+        os.makedirs(self.output_dir, exist_ok=True)
         
-        # Load Whisper model with GPU fallback
+        # Load Whisper model with GPU fallback to CPU
         print(f"{Fore.CYAN}Loading Whisper Large-v3 on GPU...{Style.RESET_ALL}")
         try:
             self.model = WhisperModel("large-v3", device="cuda", compute_type="float16")
             print(f"{Fore.GREEN}Model loaded successfully on GPU!{Style.RESET_ALL}")
         except:
+            print(f"{Fore.RED}GPU failed, falling back to CPU.{Style.RESET_ALL}")
             self.model = WhisperModel("medium", device="cpu", compute_type="int8")
-            print(f"{Fore.YELLOW}Falling back to CPU model{Style.RESET_ALL}")
 
     def download_audio(self, url, filename="raw_audio"):
         """Download audio from YouTube URL using yt-dlp"""
         print(f"{Fore.YELLOW}Downloading audio...{Style.RESET_ALL}")
+        
+        # Clean previous raw file if exists
+        if os.path.exists(f"{filename}.wav"):
+            os.remove(f"{filename}.wav")
+            
+        # Download using yt-dlp
         command = [
             "yt-dlp", "-x", "--audio-format", "wav", "--audio-quality", "0",
             "--postprocessor-args", f"ffmpeg:-ac {CONFIG['CHANNELS']} -ar {CONFIG['SAMPLE_RATE']}",
@@ -66,6 +75,9 @@ class AudioPipeline:
 
     def strip_silence(self, audio_segment, silence_thresh=-45, padding=50):
         """Trim leading and trailing silence from audio segment"""
+        if len(audio_segment) < padding:
+            return audio_segment
+            
         # Trim start silence
         start_trim = 0
         while start_trim < len(audio_segment) and audio_segment[start_trim:start_trim+10].dBFS < silence_thresh:
@@ -100,6 +112,10 @@ class AudioPipeline:
             # Clean silence from chunk boundaries
             chunk = self.strip_silence(chunk)
             
+            # Skip extremely small chunks (likely noise)
+            if len(chunk) < 500:
+                continue
+
             # Merge chunks if within size limit
             if len(current_chunk) + len(chunk) < CONFIG['MAX_SEGMENT_LEN']:
                 current_chunk += chunk
@@ -127,6 +143,9 @@ class AudioPipeline:
         """Main pipeline execution"""
         self.start_time = time.time()
         
+        # Reset metadata list for new run
+        self.metadata = []
+        
         # Download and process audio
         raw_file = self.download_audio(youtube_url)
         chunks = self.split_and_process(raw_file)
@@ -148,28 +167,32 @@ class AudioPipeline:
             try:
                 segments, _ = self.model.transcribe(filepath, language="bn")
                 text = " ".join([segment.text for segment in segments]).strip()
+                
                 if text:
                     self.metadata.append(f"{filename}|{text}|{speaker_name}")
             except Exception as e:
-                print(f"Transcription error: {e}")
+                print(f"{Fore.RED}Transcription error for {filename}: {e}{Style.RESET_ALL}")
 
-        # Save metadata file
-        with open(self.metadata_file, "w", encoding="utf-8") as f:
+        # Save metadata file with BOM for Excel compatibility
+        with open(self.metadata_file, "w", encoding="utf-8-sig") as f:
             for line in self.metadata:
                 f.write(line + "\n")
         
         # Clean up raw audio file
         if os.path.exists(raw_file):
-            os.remove(raw_file)
+            try:
+                os.remove(raw_file)
+            except:
+                pass
         
         # Print performance metrics
         total_time = time.time() - self.start_time
         rtf = total_time / self.total_audio_duration if self.total_audio_duration > 0 else 0
         
         print(f"\n{Fore.GREEN}Pipeline Complete!{Style.RESET_ALL}")
+        print(f"Metadata saved to: {self.metadata_file} (Excel compatible)")
         print(f"{Fore.YELLOW}Performance Metrics:{Style.RESET_ALL}")
         print(f"   - Total Audio Processed: {self.total_audio_duration:.2f} sec")
-        print(f"   - Total Execution Time:  {total_time:.2f} sec")
         print(f"   - Real-Time Factor (RTF): {rtf:.2f}")
 
 if __name__ == "__main__":
