@@ -40,7 +40,8 @@ python pipeline.py
 
 When prompted, enter the YouTube URL. The pipeline will handle the rest!
 
-⚙️ Technical Specifications
+# ⚙️ Technical Specifications
+```
 Parameter	Value
 Sample Rate	22050 Hz
 Bit Depth	16-bit PCM
@@ -49,3 +50,4 @@ Silence Threshold	-38 dBFS
 Min Silence Length	400 ms
 
 
+```
