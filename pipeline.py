@@ -199,4 +199,4 @@ if __name__ == "__main__":
     url = input("Enter YouTube URL: ")
     if url:
         pipeline = AudioPipeline(CONFIG['OUTPUT_DIR'], CONFIG['METADATA_FILE'])
-        pipeline.run(url, speaker_name="Habibur_Sample")
+        pipeline.run(url, speaker_name="Habibur_Sample") 
